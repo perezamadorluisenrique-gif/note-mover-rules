@@ -110,6 +110,18 @@ test('plan: a rule whose folder is the note\'s own stops later rules', () => {
   assert.equal(p.status === 'skip' && p.reason, 'in-place');
 });
 
+test('plan: rules that would bounce a note are left alone', () => {
+  const toA = rule({ type: 'path', value: '^B/', destination: 'A' });
+  const toB = rule({ value: 'x', destination: 'B' });
+  const p = plan(note('B/n.md', { tags: ['x'] }), [toA, toB], none);
+  assert.equal(p.status === 'skip' && p.reason, 'unstable');
+  assert.equal(p.status === 'skip' && p.to, 'A/n.md');
+  // From the inbox it would land in B and then be sent on to A: also left alone.
+  assert.equal(plan(note('Inbox/n.md', { tags: ['x'] }), [toA, toB], none).status, 'skip');
+  // A note the loop does not reach still moves.
+  assert.equal(plan(note('Inbox/m.md', { tags: ['x'] }), [toB], none).status, 'move');
+});
+
 test('plan: root destination', () => {
   const r = rule({ value: 'top', destination: '/' });
   assert.equal(plan(note('Inbox/x.md', { tags: ['top'] }), [r], none).status, 'move');
@@ -123,6 +135,7 @@ test('excluded folders and the disable property', () => {
   assert.equal(isExcluded('Templates/sub/a.md', ['/Templates/']), true);
   assert.equal(isExcluded('TemplatesX/a.md', ['Templates']), false);
   assert.equal(isExcluded('a.md', ['']), false);
+  assert.equal(isExcluded('templates/a.md', ['Templates']), true);
   const ex = plan(note('Templates/a.md', { tags: ['t'] }), [r], { ...none, excluded: ['Templates'] });
   assert.equal(ex.status === 'skip' && ex.reason, 'excluded');
   assert.equal(isDisabled({ 'note-mover': 'disable' }), true);

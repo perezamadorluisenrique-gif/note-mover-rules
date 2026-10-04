@@ -26,10 +26,16 @@ interface NoteMoverSettings {
 
 const DEFAULT_SETTINGS: NoteMoverSettings = {
   rules: [],
-  excluded: [],
+  excluded: ['Templates'],
   autoMove: false,
   createFolders: true,
 };
+
+/** Moving a note rewrites links in other notes, and those edits reach the metadata cache a little later: ignore them for this long (ms) after a move. */
+const SETTLE_MS = 5000;
+
+/** How many batches the undo command can step back through. */
+const HISTORY = 20;
 
 /** After a note changes, wait this long (ms) before moving it, so a half-typed tag does not send it away. */
 const AUTO_DELAY_MS = 2000;
@@ -63,8 +69,13 @@ function describeRule(rule: Rule): string {
 
 export default class NoteMoverRulesPlugin extends Plugin {
   settings: NoteMoverSettings = { ...DEFAULT_SETTINGS };
-  /** The last batch that moved, for the undo command. */
-  last: Move[] = [];
+  /** Batches that moved, newest last, for the undo command: an automatic move never hides an earlier batch. */
+  history: Move[][] = [];
+  /** Notes put back by undo this session: automatic moving leaves them where they are. */
+  private undone = new Set<TFile>();
+  /** Moves or undo in progress, and until when their side effects (link rewrites) count as noise. */
+  private busy = 0;
+  private quietUntil = 0;
   private timers = new Map<TFile, number>();
   /** Paths this plugin is moving right now, so its own rename events do not start another pass. */
   private moving = new Set<string>();
@@ -107,7 +118,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
       name: 'Undo the last move',
       icon: 'undo-2',
       checkCallback: (checking) => {
-        if (!this.last.length) return false;
+        if (!this.history.length) return false;
         if (!checking) void this.undo();
         return true;
       },
@@ -132,8 +143,25 @@ export default class NoteMoverRulesPlugin extends Plugin {
   }
 
   onunload() {
+    this.cancelTimers();
+  }
+
+  private cancelTimers() {
     for (const t of this.timers.values()) window.clearTimeout(t);
     this.timers.clear();
+  }
+
+  /** Edits caused by a move (links rewritten in other notes) must not start moves of their own. */
+  private async quiet<T>(work: () => Promise<T>): Promise<T> {
+    this.busy++;
+    this.cancelTimers();
+    try {
+      return await work();
+    } finally {
+      this.busy--;
+      this.quietUntil = Date.now() + SETTLE_MS;
+      this.cancelTimers();
+    }
   }
 
   async loadSettings() {
@@ -179,7 +207,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
     }
     const plans = this.planFor(this.notesIn(folder));
     const moves = plans.filter((p): p is Extract<Plan, { status: 'move' }> => p.status === 'move');
-    const conflicts = plans.filter((p): p is Extract<Plan, { status: 'skip' }> => p.status === 'skip' && p.reason === 'conflict');
+    const conflicts = plans.filter((p): p is Extract<Plan, { status: 'skip' }> => p.status === 'skip' && (p.reason === 'conflict' || p.reason === 'unstable'));
     if (!moves.length && !conflicts.length) {
       new Notice('No notes to move: none matches a rule outside its folder.');
       return;
@@ -200,6 +228,10 @@ export default class NoteMoverRulesPlugin extends Plugin {
 
   /** Moves each planned note with `renameFile`, so links to it update, and remembers the batch. */
   async run(plans: Plan[]): Promise<Move[]> {
+    return this.quiet(() => this.runMoves(plans));
+  }
+
+  private async runMoves(plans: Plan[]): Promise<Move[]> {
     const done: Move[] = [];
     const problems: string[] = [];
     for (const p of plans) {
@@ -224,7 +256,10 @@ export default class NoteMoverRulesPlugin extends Plugin {
         this.moving.delete(p.to);
       }
     }
-    if (done.length) this.last = done;
+    if (done.length) {
+      this.history.push(done);
+      if (this.history.length > HISTORY) this.history.shift();
+    }
     this.report(done, problems);
     return done;
   }
@@ -250,8 +285,13 @@ export default class NoteMoverRulesPlugin extends Plugin {
   }
 
   async undo() {
+    await this.quiet(() => this.undoLast());
+  }
+
+  private async undoLast() {
+    const batch = this.history.pop() ?? [];
     const paths = this.pathSet();
-    const steps = undoSteps(this.last, (p) => paths.has(p.toLowerCase()));
+    const steps = undoSteps(batch, (p) => paths.has(p.toLowerCase()));
     let back = 0;
     let stayed = 0;
     for (const s of steps) {
@@ -263,6 +303,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
       this.moving.add(s.from);
       try {
         await this.app.fileManager.renameFile(file, s.from);
+        this.undone.add(file);
         back++;
       } catch {
         stayed++;
@@ -270,14 +311,13 @@ export default class NoteMoverRulesPlugin extends Plugin {
         this.moving.delete(s.from);
       }
     }
-    this.last = [];
     new Notice(`Put ${back} ${back === 1 ? 'note' : 'notes'} back.${stayed ? ` ${stayed} could not go back: moved or replaced since.` : ''}`);
   }
 
   /** Waits for the note to settle, then moves it if a rule says so. */
   private schedule(file: TAbstractFile) {
     if (!this.settings.autoMove || !(file instanceof TFile) || file.extension !== 'md') return;
-    if (this.moving.has(file.path)) return;
+    if (this.moving.has(file.path) || this.busy > 0 || Date.now() < this.quietUntil) return;
     const old = this.timers.get(file);
     if (old !== undefined) window.clearTimeout(old);
     this.timers.set(
@@ -290,7 +330,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
   }
 
   private async auto(file: TFile) {
-    if (!this.settings.autoMove || !this.app.vault.getFileByPath(file.path)) return;
+    if (!this.settings.autoMove || this.undone.has(file) || !this.app.vault.getFileByPath(file.path)) return;
     const taken = this.pathSet();
     const p = plan(this.noteInfo(file), this.settings.rules, { excluded: this.settings.excluded, exists: (x) => taken.has(x.toLowerCase()) });
     if (p.status === 'move') {
@@ -347,13 +387,16 @@ class PreviewModal extends Modal {
       text.createDiv({ text: `→ ${folder || 'vault root'}${isNew ? (this.createFolders ? ' (new folder)' : ' (folder missing: will not move)') : ''}`, cls: 'note-mover-rules-to' });
     }
     if (this.conflicts.length) {
-      contentEl.createEl('h4', { text: `Will stay: a note with that name is already there (${this.conflicts.length})` });
+      contentEl.createEl('h4', { text: `Will stay (${this.conflicts.length})` });
       const stay = contentEl.createEl('ul', { cls: 'note-mover-rules-stay' });
-      for (const c of this.conflicts) stay.createEl('li', { text: `${c.from} → ${c.to ?? ''}` });
+      for (const c of this.conflicts) stay.createEl('li', { text: `${c.from} → ${c.to ?? ''}: ${SKIP_TEXT[c.reason]}` });
     }
+    const always = (this.app.vault as unknown as { getConfig?: (key: string) => unknown }).getConfig?.('alwaysUpdateLinks') === true;
     contentEl.createEl('p', {
-      text: 'Links to moved notes are updated. If Obsidian asks, choose “Always update” so it does not ask for each note.',
-      cls: 'setting-item-description',
+      text: always
+        ? 'Links to moved notes are updated.'
+        : 'Obsidian will ask whether to update links, once per note that has links to it, after that note has moved. Turn on “Automatically update internal links” in Settings → Files and links first to move everything in one go.',
+      cls: always ? 'setting-item-description' : 'note-mover-rules-problem',
     });
     const footer = contentEl.createDiv({ cls: 'modal-button-container' });
     const all = footer.createEl('button', { text: 'Select all' });
@@ -393,7 +436,7 @@ class PreviewModal extends Modal {
 const TEXT = {
   autoMove: {
     name: 'Move notes by themselves',
-    desc: 'When a note is edited or renamed and now matches a rule, move it two seconds later. Off: notes move only with the commands. The undo command takes it back.',
+    desc: 'When a note is edited or renamed and now matches a rule, move it two seconds later. Off: notes move only with the commands. The undo command takes it back, and that note is not moved by itself again. Turn on “Automatically update internal links” in Settings → Files and links, or Obsidian asks about links after every move.',
   },
   createFolders: {
     name: 'Create missing folders',

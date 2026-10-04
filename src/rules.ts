@@ -37,7 +37,7 @@ export const RULE_LABELS: Record<RuleType, string> = {
   path: 'Path matches',
 };
 
-export type SkipReason = 'excluded' | 'disabled' | 'no-rule' | 'in-place' | 'conflict';
+export type SkipReason = 'excluded' | 'disabled' | 'no-rule' | 'in-place' | 'conflict' | 'unstable';
 
 export type Plan =
   | { status: 'move'; from: string; to: string; rule: Rule }
@@ -169,10 +169,11 @@ export function firstMatch(note: NoteInfo, rules: Rule[]): Rule | null {
   return rules.find((r) => ruleMatches(note, r)) ?? null;
 }
 
+/** Folder names compare ignoring case, as macOS and Windows file systems do. */
 export function isExcluded(path: string, excluded: string[]): boolean {
-  const folder = folderOf(path);
+  const folder = folderOf(path).toLowerCase();
   return excluded.some((raw) => {
-    const e = normalizeFolder(raw);
+    const e = normalizeFolder(raw)?.toLowerCase();
     if (!e) return false;
     return folder === e || folder.startsWith(e + '/');
   });
@@ -194,6 +195,10 @@ export function plan(note: NoteInfo, rules: Rule[], opts: PlanOptions): Plan {
   if (inPlace(from, destination)) return { status: 'skip', from, reason: 'in-place', rule };
   const to = destination ? `${destination}/${fileName(from)}` : fileName(from);
   if (opts.exists(to)) return { status: 'skip', from, reason: 'conflict', rule, to };
+  // Rules that send a note back and forth (a path rule matching the new place, say) would
+  // move it again after every move: leave it where it is.
+  const next = firstMatch({ ...note, path: to }, rules);
+  if (next && !inPlace(to, normalizeFolder(next.destination) ?? '')) return { status: 'skip', from, reason: 'unstable', rule, to };
   return { status: 'move', from, to, rule };
 }
 
@@ -238,4 +243,5 @@ export const SKIP_TEXT: Record<SkipReason, string> = {
   'no-rule': 'matches no rule',
   'in-place': 'already in its folder',
   conflict: 'a note with that name is already there',
+  unstable: 'another rule would move it again from its new folder',
 };

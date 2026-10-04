@@ -23,7 +23,8 @@ Things that keep it from surprising you:
 
 - A note **already inside** the destination folder (or one of its subfolders) stays where it is, and a rule that matches it stops later rules from moving it.
 - A note is never overwritten: if a note with that name is already in the destination, it stays and the preview lists it separately.
-- Notes in an excluded folder never move, and neither does a note with `note-mover: disable` in its properties.
+- Two rules that would send a note back and forth (a path rule matching the new folder, say) never move it: the preview lists it as staying.
+- Notes in an excluded folder (`Templates` by default, names compared ignoring case) never move, and neither does a note with `note-mover: disable` in its properties.
 - A rule with a problem (an invalid regular expression, an empty tag) says so in the settings and never matches.
 - The destination folder is created if it does not exist, unless you turn that off.
 
@@ -34,15 +35,15 @@ Things that keep it from surprising you:
 | Move this note by the rules | Moves the open note now, or tells you why it stays. |
 | Preview moves for the notes in this folder | Lists every move for the notes in the open note's folder (subfolders included) with a checkbox for each. Nothing moves until you press the button. |
 | Preview moves for every note | The same for the whole vault. |
-| Undo the last move | Puts the last batch back. A note that was moved again or whose old place is taken stays where it is. |
+| Undo the last move | Puts the last batch back; run it again to step back through earlier batches (the last 20). A note that was moved again or whose old place is taken stays where it is. |
 
 There is also a **Move notes by the rules** item in the file explorer's folder menu.
 
-Moves use Obsidian's own rename, so links to the moved notes update as usual. If Obsidian asks whether to update links, choose **Always update** so it does not ask for every note.
+Moves use Obsidian's own rename, so links to the moved notes update as usual. Turn on **Automatically update internal links** in Settings → Files and links first: otherwise Obsidian asks about links once per note that has links to it, after each move. The preview warns you when it is off.
 
 ## Moving by itself
 
-Turn on **Move notes by themselves** and a note that is edited or renamed and now matches a rule moves two seconds later, so a half-typed tag does not send it away. It is off by default. If the destination already has a note with that name, you get one notice and the note stays.
+Turn on **Move notes by themselves** and a note that is edited or renamed and now matches a rule moves two seconds later, so a half-typed tag does not send it away. It is off by default. If the destination already has a note with that name, you get one notice and the note stays. A note you put back with undo is not moved by itself again, and for five seconds after a move the plugin ignores edits (Obsidian rewriting links in other notes), so a move never sets off more moves.
 
 ## Coming from Auto Note Mover
 
