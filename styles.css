@@ -1,0 +1,52 @@
+.note-mover-rules-rule {
+  flex-wrap: wrap;
+  row-gap: var(--size-4-2);
+}
+
+.note-mover-rules-rule .setting-item-info {
+  flex: 1 1 100%;
+}
+
+.note-mover-rules-rule .setting-item-control {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.note-mover-rules-rule .note-mover-rules-input {
+  flex: 1 1 120px;
+  min-width: 100px;
+  width: auto;
+}
+
+.note-mover-rules-problem {
+  color: var(--text-error);
+}
+
+.note-mover-rules-modal .note-mover-rules-list {
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.note-mover-rules-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--size-4-2);
+  padding: var(--size-4-1) 0;
+  cursor: pointer;
+}
+
+.note-mover-rules-from {
+  word-break: break-all;
+}
+
+.note-mover-rules-to {
+  color: var(--text-muted);
+  font-size: var(--font-smaller);
+}
+
+.note-mover-rules-stay {
+  color: var(--text-muted);
+  font-size: var(--font-smaller);
+  word-break: break-all;
+}
