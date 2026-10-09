@@ -50,3 +50,12 @@
   font-size: var(--font-smaller);
   word-break: break-all;
 }
+
+.note-mover-rules-example {
+  color: var(--text-muted);
+  font-size: var(--font-smaller);
+}
+
+.note-mover-rules-rule .note-mover-rules-input.note-mover-rules-hidden {
+  display: none;
+}

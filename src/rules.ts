@@ -1,4 +1,6 @@
 // Pure logic: no `obsidian` import, so tests/ can run it under plain Node.
+import { hasPlaceholders, resolveTemplate, templateProblem } from './template.ts';
+import type { Resolved } from './template.ts';
 
 export type RuleType = 'tag' | 'property' | 'title' | 'path';
 
@@ -13,8 +15,13 @@ export interface Rule {
    * `title` and `path`: a regular expression, case-insensitive.
    */
   value: string;
-  /** Destination folder, vault-relative. Empty: the vault root. */
+  /**
+   * Destination folder, vault-relative. Empty: the vault root. May hold placeholders:
+   * `{{date:YYYY/MM}}`, `{{property:name}}`, `{{tag}}`, `{{title}}`, `{{parent}}`.
+   */
   destination: string;
+  /** For `{{date:…}}`: the property to read the date from. Empty or not a date: the note's creation time. */
+  dateProperty?: string;
 }
 
 export interface NoteInfo {
@@ -24,6 +31,8 @@ export interface NoteInfo {
   tags: string[];
   /** Parsed frontmatter. */
   properties: Record<string, unknown>;
+  /** Creation time in milliseconds, for `{{date:…}}`. */
+  ctime?: number;
 }
 
 /** A note with this property set to one of the DISABLE_VALUES is never moved. */
@@ -37,17 +46,19 @@ export const RULE_LABELS: Record<RuleType, string> = {
   path: 'Path matches',
 };
 
-export type SkipReason = 'excluded' | 'disabled' | 'no-rule' | 'in-place' | 'conflict' | 'unstable';
+export type SkipReason = 'excluded' | 'disabled' | 'no-rule' | 'in-place' | 'conflict' | 'unstable' | 'empty' | 'invalid';
 
 export type Plan =
   | { status: 'move'; from: string; to: string; rule: Rule }
-  | { status: 'skip'; from: string; reason: SkipReason; rule?: Rule; to?: string };
+  | { status: 'skip'; from: string; reason: SkipReason; rule?: Rule; to?: string; detail?: string };
 
 export interface PlanOptions {
   /** Folders whose notes are never moved (the folder and everything inside it). */
   excluded: string[];
   /** Whether a file or folder already sits at this path. Compared by the caller case-insensitively. */
   exists: (path: string) => boolean;
+  /** Formats a date for `{{date:…}}`; the plugin gives it the app's moment. */
+  formatDate?: (input: string | number, format: string) => string | null;
 }
 
 /** A vault-relative folder path, cleaned up. `''` is the vault root. `null` when it cannot be a folder. */
@@ -122,7 +133,10 @@ export function isDisabled(props: Record<string, unknown>): boolean {
 
 /** What is wrong with a rule, for the settings tab. `null`: nothing. */
 export function ruleProblem(rule: Rule): string | null {
-  if (normalizeFolder(rule.destination) === null) return 'The destination is not a valid folder path.';
+  if (hasPlaceholders(rule.destination)) {
+    const problem = templateProblem(rule.destination, normalizeFolder);
+    if (problem) return problem;
+  } else if (normalizeFolder(rule.destination) === null) return 'The destination is not a valid folder path.';
   switch (rule.type) {
     case 'tag':
       return normalizeTag(rule.value) ? null : 'Enter a tag.';
@@ -185,20 +199,65 @@ export function inPlace(path: string, destination: string): boolean {
   return destination === '' ? folder === '' : folder === destination || folder.startsWith(destination + '/');
 }
 
+/** The note's own tag (without `#`, nested tags whole) that made a tag rule match, or `null`. */
+export function matchedTag(noteTags: string[], ruleTag: string): string | null {
+  const wanted = normalizeTag(ruleTag);
+  if (!wanted) return null;
+  const hit = noteTags.find((t) => {
+    const tag = normalizeTag(t);
+    return tag === wanted || tag.startsWith(wanted + '/');
+  });
+  return hit === undefined ? null : hit.trim().replace(/^#/, '');
+}
+
+function lastSegment(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/**
+ * The folder a rule sends this note to. A plain destination is just cleaned up; one with
+ * placeholders is filled in from the note. `empty` names a placeholder with nothing to put in it.
+ */
+export function resolveDestination(note: NoteInfo, rule: Rule, formatDate?: PlanOptions['formatDate']): Resolved {
+  if (!hasPlaceholders(rule.destination)) {
+    const folder = normalizeFolder(rule.destination);
+    return folder === null ? { invalid: 'The destination is not a valid folder path.' } : { folder };
+  }
+  return resolveTemplate(
+    rule.destination,
+    {
+      title: basenameOf(note.path),
+      parent: lastSegment(folderOf(note.path)),
+      tag: rule.type === 'tag' ? matchedTag(note.tags, rule.value) : null,
+      properties: note.properties,
+      ctime: note.ctime ?? 0,
+      dateProperty: rule.dateProperty ?? '',
+      formatDate,
+    },
+    normalizeFolder,
+  );
+}
+
 export function plan(note: NoteInfo, rules: Rule[], opts: PlanOptions): Plan {
   const from = note.path;
   if (isExcluded(from, opts.excluded)) return { status: 'skip', from, reason: 'excluded' };
   if (isDisabled(note.properties)) return { status: 'skip', from, reason: 'disabled' };
   const rule = firstMatch(note, rules);
   if (!rule) return { status: 'skip', from, reason: 'no-rule' };
-  const destination = normalizeFolder(rule.destination) ?? '';
+  const resolved = resolveDestination(note, rule, opts.formatDate);
+  if ('empty' in resolved) return { status: 'skip', from, reason: 'empty', rule, detail: resolved.empty };
+  if ('invalid' in resolved) return { status: 'skip', from, reason: 'invalid', rule, detail: resolved.invalid };
+  const destination = resolved.folder;
   if (inPlace(from, destination)) return { status: 'skip', from, reason: 'in-place', rule };
   const to = destination ? `${destination}/${fileName(from)}` : fileName(from);
   if (opts.exists(to)) return { status: 'skip', from, reason: 'conflict', rule, to };
   // Rules that send a note back and forth (a path rule matching the new place, say) would
   // move it again after every move: leave it where it is.
-  const next = firstMatch({ ...note, path: to }, rules);
-  if (next && !inPlace(to, normalizeFolder(next.destination) ?? '')) return { status: 'skip', from, reason: 'unstable', rule, to };
+  // A placeholder can change with the move ({{parent}}), so the next pass is resolved from the new path.
+  const moved = { ...note, path: to };
+  const next = firstMatch(moved, rules);
+  const nextDest = next ? resolveDestination(moved, next, opts.formatDate) : null;
+  if (next && nextDest && 'folder' in nextDest && !inPlace(to, nextDest.folder)) return { status: 'skip', from, reason: 'unstable', rule, to };
   return { status: 'move', from, to, rule };
 }
 
@@ -244,4 +303,12 @@ export const SKIP_TEXT: Record<SkipReason, string> = {
   'in-place': 'already in its folder',
   conflict: 'a note with that name is already there',
   unstable: 'another rule would move it again from its new folder',
+  empty: 'skipped: empty placeholder',
+  invalid: 'the destination is not valid',
 };
+
+/** Why a note stays, with the placeholder that came out empty named. */
+export function skipText(reason: SkipReason, detail?: string): string {
+  if (reason === 'empty' && detail) return `skipped: empty ${detail}`;
+  return SKIP_TEXT[reason];
+}

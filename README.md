@@ -28,6 +28,25 @@ Things that keep it from surprising you:
 - A rule with a problem (an invalid regular expression, an empty tag) says so in the settings and never matches.
 - The destination folder is created if it does not exist, unless you turn that off.
 
+## Folders built from the note
+
+A destination can hold placeholders, so one rule files notes by year, project or type:
+
+| Placeholder | Becomes |
+|---|---|
+| `{{date:YYYY/MM}}` | The note's date in any [Moment format](https://momentjs.com/docs/#/displaying/format/). It comes from the property named in the rule's **Date from property** field when that holds a date such as `2026-10-09`; otherwise from the note's creation time. |
+| `{{property:project}}` | The property's value; the first item of a list; `[[links]]` without the brackets. |
+| `{{tag}}` | The tag that made a tag rule match, with nested tags kept as folders: `#project/alpha` gives `project/alpha`. |
+| `{{title}}` | The note's name. |
+| `{{parent}}` | The name of the folder the note is in now. |
+
+For example, `Journal/{{date:YYYY/MM}}` sends a note created in October 2026 to `Journal/2026/10`, and `Projects/{{property:project}}` sends a note with `project: Apollo` to `Projects/Apollo`. Under a rule with placeholders the settings show what the destination comes to for the note you have open.
+
+- Values are made safe for folder names: `\ / : * ? " < > |` are removed or replaced, leading and trailing dots and spaces are dropped, and `..` never survives.
+- If a placeholder comes out empty (no such property, no date, no matching tag), the rule does not move that note, and later rules do not take it either. The preview lists it under "Will stay" as, for example, "skipped: empty {{property:project}}".
+- The creation time is the file's, and copying or syncing a vault can reset it. For a date that must not change, put it in a property and name that property in the rule.
+- The preview with its checkboxes, undo, **Create missing folders**, moving by itself and excluded folders all work with placeholders. A note already inside its resolved folder stays.
+
 ## Commands
 
 | Command | What it does |
