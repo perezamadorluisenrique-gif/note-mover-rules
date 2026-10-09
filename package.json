@@ -1,6 +1,6 @@
 {
   "name": "note-mover-rules",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Note Mover Rules for Obsidian - Move notes into folders by ordered rules on tags, properties, titles and paths, with a preview before any bulk move.",
   "main": "main.js",
   "scripts": {

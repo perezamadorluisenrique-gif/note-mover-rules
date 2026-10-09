@@ -1,5 +1,5 @@
 import type { SettingDefinitionItem } from 'obsidian';
-import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, getAllTags } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, getAllTags, moment } from 'obsidian';
 
 import {
   DISABLE_PROPERTY,
@@ -9,9 +9,13 @@ import {
   normalizeFolder,
   plan,
   planBatch,
+  resolveDestination,
+  ruleMatches,
   ruleProblem,
+  skipText,
   undoSteps,
 } from './src/rules.ts';
+import { hasPlaceholders } from './src/template.ts';
 import type { Move, NoteInfo, Plan, Rule, RuleType } from './src/rules.ts';
 
 interface NoteMoverSettings {
@@ -50,11 +54,26 @@ function newRule(): Rule {
     property: '',
     value: '',
     destination: '',
+    dateProperty: '',
   };
 }
 
+interface MomentValue {
+  isValid(): boolean;
+  format(format: string): string;
+}
+type MomentFn = ((input: string | number, format?: unknown, strict?: boolean) => MomentValue) & { ISO_8601: unknown };
+
+/** The app's moment, for `{{date:…}}`. Text is read as an ISO date (2026-10-09, with or without a time); anything else is not a date. */
+function formatDate(input: string | number, format: string): string | null {
+  // Typed by hand: the review environment cannot resolve the `moment` package types.
+  const make = moment as unknown as MomentFn;
+  const m = typeof input === 'number' ? make(input) : make(input, make.ISO_8601, true);
+  return m.isValid() ? m.format(format) : null;
+}
+
 function describeRule(rule: Rule): string {
-  const dest = normalizeFolder(rule.destination) || '/';
+  const dest = (hasPlaceholders(rule.destination) ? rule.destination.trim() : normalizeFolder(rule.destination)) || '/';
   switch (rule.type) {
     case 'tag':
       return `#${rule.value.replace(/^#/, '')} → ${dest}`;
@@ -178,7 +197,17 @@ export default class NoteMoverRulesPlugin extends Plugin {
   noteInfo(file: TFile): NoteInfo {
     const cache = this.app.metadataCache.getFileCache(file);
     const properties = (cache?.frontmatter ?? {}) as Record<string, unknown>;
-    return { path: file.path, tags: (cache ? getAllTags(cache) : null) ?? [], properties };
+    return { path: file.path, tags: (cache ? getAllTags(cache) : null) ?? [], properties, ctime: file.stat.ctime };
+  }
+
+  /** For the settings: what this rule's destination comes to for the note that is open. `null`: no placeholders or no note. */
+  exampleFor(rule: Rule): string | null {
+    const file = this.app.workspace.getActiveFile();
+    if (!file || file.extension !== 'md' || !hasPlaceholders(rule.destination)) return null;
+    const note = this.noteInfo(file);
+    const r = resolveDestination(note, rule, formatDate);
+    const out = 'folder' in r ? r.folder || '/' : 'empty' in r ? `skipped: empty ${r.empty}` : r.invalid;
+    return `For “${file.basename}”: ${out}${ruleMatches(note, rule) ? '' : ' (the note does not match this rule)'}`;
   }
 
   /** Every path in the vault, lowercased: a move onto `a.md` also collides with `A.md` on case-insensitive file systems. */
@@ -191,7 +220,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
     return planBatch(
       files.map((f) => this.noteInfo(f)),
       this.settings.rules,
-      { excluded: this.settings.excluded, exists: (p) => taken.has(p.toLowerCase()) },
+      { excluded: this.settings.excluded, exists: (p) => taken.has(p.toLowerCase()), formatDate },
     );
   }
 
@@ -207,7 +236,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
     }
     const plans = this.planFor(this.notesIn(folder));
     const moves = plans.filter((p): p is Extract<Plan, { status: 'move' }> => p.status === 'move');
-    const conflicts = plans.filter((p): p is Extract<Plan, { status: 'skip' }> => p.status === 'skip' && (p.reason === 'conflict' || p.reason === 'unstable'));
+    const conflicts = plans.filter((p): p is Extract<Plan, { status: 'skip' }> => p.status === 'skip' && (p.reason === 'conflict' || p.reason === 'unstable' || p.reason === 'empty' || p.reason === 'invalid'));
     if (!moves.length && !conflicts.length) {
       new Notice('No notes to move: none matches a rule outside its folder.');
       return;
@@ -222,7 +251,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
     if (p.status === 'move') {
       await this.run([p]);
     } else if (explain) {
-      new Notice(`“${files[0]?.basename ?? ''}” stays: ${SKIP_TEXT[p.reason]}.`);
+      new Notice(`“${files[0]?.basename ?? ''}” stays: ${skipText(p.reason, p.detail)}.`);
     }
   }
 
@@ -332,7 +361,7 @@ export default class NoteMoverRulesPlugin extends Plugin {
   private async auto(file: TFile) {
     if (!this.settings.autoMove || this.undone.has(file) || !this.app.vault.getFileByPath(file.path)) return;
     const taken = this.pathSet();
-    const p = plan(this.noteInfo(file), this.settings.rules, { excluded: this.settings.excluded, exists: (x) => taken.has(x.toLowerCase()) });
+    const p = plan(this.noteInfo(file), this.settings.rules, { excluded: this.settings.excluded, exists: (x) => taken.has(x.toLowerCase()), formatDate });
     if (p.status === 'move') {
       await this.run([p]);
     } else if (p.reason === 'conflict' && p.to) {
@@ -389,7 +418,7 @@ class PreviewModal extends Modal {
     if (this.conflicts.length) {
       contentEl.createEl('h4', { text: `Will stay (${this.conflicts.length})` });
       const stay = contentEl.createEl('ul', { cls: 'note-mover-rules-stay' });
-      for (const c of this.conflicts) stay.createEl('li', { text: `${c.from} → ${c.to ?? ''}: ${SKIP_TEXT[c.reason]}` });
+      for (const c of this.conflicts) stay.createEl('li', { text: `${c.from}${c.to ? ` → ${c.to}` : ''}: ${skipText(c.reason, c.detail)}` });
     }
     const always = (this.app.vault as unknown as { getConfig?: (key: string) => unknown }).getConfig?.('alwaysUpdateLinks') === true;
     contentEl.createEl('p', {
@@ -604,6 +633,8 @@ class NoteMoverSettingTab extends PluginSettingTab {
       const problem = ruleProblem(rule);
       setting.setDesc(problem ?? describeRule(rule));
       setting.descEl.toggleClass('note-mover-rules-problem', Boolean(problem));
+      const example = problem ? null : this.plugin.exampleFor(rule);
+      if (example) setting.descEl.createDiv({ text: example, cls: 'note-mover-rules-example' });
     };
     setting.addToggle((t) =>
       t.setValue(rule.enabled).onChange(async (v) => {
@@ -648,11 +679,26 @@ class NoteMoverSettingTab extends PluginSettingTab {
         .setValue(rule.destination)
         .onChange(async (v) => {
           rule.destination = v;
+          syncDate();
           show();
           await save();
         });
       t.inputEl.addClass('note-mover-rules-input');
     });
+    let dateInput: HTMLInputElement | null = null;
+    const syncDate = () => dateInput?.toggleClass('note-mover-rules-hidden', !rule.destination.includes('{{date'));
+    setting.addText((t) => {
+      t.setPlaceholder('Date from property (default: created)')
+        .setValue(rule.dateProperty ?? '')
+        .onChange(async (v) => {
+          rule.dateProperty = v;
+          show();
+          await save();
+        });
+      t.inputEl.addClass('note-mover-rules-input');
+      dateInput = t.inputEl;
+    });
+    syncDate();
     show();
   }
 }
