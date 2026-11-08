@@ -17,6 +17,7 @@ import {
 } from './src/rules.ts';
 import { hasPlaceholders } from './src/template.ts';
 import type { Move, NoteInfo, Plan, Rule, RuleType } from './src/rules.ts';
+import { moreDefinitions, renderMore } from './src/more-link.ts';
 
 interface NoteMoverSettings {
   rules: Rule[];
@@ -514,6 +515,7 @@ class NoteMoverSettingTab extends PluginSettingTab {
           { ...TEXT.excluded, control: { type: 'textarea', key: 'excluded', rows: 3, placeholder: 'Templates', defaultValue: '' } },
         ],
       },
+      ...(moreDefinitions() as SettingDefinitionItem[]),
     ];
   }
 
@@ -598,6 +600,7 @@ class NoteMoverSettingTab extends PluginSettingTab {
           .onChange((v) => this.setControlValue('excluded', v));
         t.inputEl.rows = 3;
       });
+    renderMore(this.containerEl, (el) => new Setting(el));
   }
 
   /** Up, down and delete, which the declarative list draws itself. */
